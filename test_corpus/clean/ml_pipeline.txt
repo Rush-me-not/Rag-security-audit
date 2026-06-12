@@ -1,0 +1,34 @@
+# Machine Learning Pipeline Overview
+
+## Architecture
+
+Our ML pipeline processes customer data to generate product recommendations.
+
+### Components
+
+1. **Data Ingestion:** Apache Kafka streams customer events
+2. **Feature Store:** Redis caches computed features
+3. **Training:** PyTorch models trained on GPU cluster
+4. **Serving:** FastAPI endpoints with model versioning
+5. **Monitoring:** Prometheus + Grafana for model drift detection
+
+## Model Details
+
+- Architecture: Transformer-based collaborative filtering
+- Training data: 2 years of customer interaction logs
+- Retraining frequency: Weekly (automated)
+- Average latency: 45ms (p99: 120ms)
+
+## Security Measures
+
+- All data encrypted at rest (AES-256) and in transit (TLS 1.3)
+- PII is tokenized before entering the pipeline
+- Model access requires service account with MFA
+- Audit logs retained for 1 year
+- Annual third-party security audit
+
+## Known Limitations
+
+- Cold start problem for new users (< 5 interactions)
+- Model bias toward popular items (being addressed with exploration strategies)
+- No support for real-time feature updates (batch only)

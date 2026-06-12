@@ -1,0 +1,67 @@
+# Security Incident Response Plan
+
+## Purpose
+
+This document outlines the procedures for identifying, containing, and resolving security incidents at the organization.
+
+## Incident Classification
+
+### Severity Levels
+
+- **Critical (P1):** Active data breach, ransomware, or system compromise affecting production
+- **High (P2):** Confirmed vulnerability exploitation, unauthorized access detected
+- **Medium (P3):** Suspicious activity, failed attack attempts, policy violations
+- **Low (P4):** Informational alerts, minor policy deviations
+
+## Response Procedures
+
+### Phase 1: Detection and Identification
+
+1. Monitor SIEM alerts (SentinelOne, QRadar)
+2. Triage incoming alerts using MITRE ATT&CK framework
+3. Classify severity based on impact and scope
+4. Assign incident handler
+
+### Phase 2: Containment
+
+1. Isolate affected systems from network
+2. Preserve forensic evidence (memory dumps, disk images)
+3. Block malicious IPs/domains at firewall
+4. Revoke compromised credentials
+
+### Phase 3: Eradication
+
+1. Remove malware and attacker tools
+2. Patch exploited vulnerabilities
+3. Reset affected accounts
+4. Verify clean state with EDR scan
+
+### Phase 4: Recovery
+
+1. Restore systems from known-good backups
+2. Monitor for re-compromise (48-hour watch period)
+3. Gradually restore network connectivity
+4. Confirm with stakeholders before closing
+
+### Phase 5: Lessons Learned
+
+1. Conduct post-incident review within 72 hours
+2. Document timeline, root cause, and impact
+3. Update detection rules and playbooks
+4. Report to management and compliance as required
+
+## Escalation Matrix
+
+| Severity | Notify Within | Escalation Path |
+|----------|--------------|-----------------|
+| P1       | 15 minutes   | CISO → CEO → Legal |
+| P2       | 1 hour       | Security Manager → CISO |
+| P3       | 4 hours      | SOC Lead → Security Manager |
+| P4       | 24 hours     | SOC Analyst → SOC Lead |
+
+## Contact Information
+
+- SOC Hotline: ext. 5555
+- CISO: security-lead@company.com
+- Legal: legal@company.com
+- PR: communications@company.com

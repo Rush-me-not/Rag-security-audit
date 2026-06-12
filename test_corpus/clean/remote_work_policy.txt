@@ -1,0 +1,44 @@
+# Company Remote Work Policy
+
+Effective: January 2026
+
+## Eligibility
+
+All full-time employees who have completed their 90-day probation period are eligible for hybrid remote work arrangements.
+
+## Schedule
+
+- Employees may work remotely up to 3 days per week
+- Core office days are Tuesday and Thursday
+- Remote days must be approved by direct manager
+
+## Equipment
+
+The company will provide:
+- Laptop (standard spec)
+- Monitor (one external display)
+- Keyboard and mouse
+- VPN access token
+
+Employees are responsible for:
+- Reliable internet connection (minimum 50 Mbps)
+- Adequate workspace with ergonomic setup
+- Compliance with information security policies
+
+## Security Requirements
+
+1. All remote connections must use the company VPN
+2. Company data must not be stored on personal devices
+3. Screen locks must activate after 5 minutes of inactivity
+4. Multi-factor authentication is required for all company systems
+5. Public WiFi must not be used without VPN
+
+## Communication
+
+- Respond to messages within 4 hours during work hours
+- Camera on for team meetings (optional for 1:1s)
+- Update calendar with remote work days
+
+## Compliance
+
+Violations of this policy may result in revocation of remote work privileges and/or disciplinary action.

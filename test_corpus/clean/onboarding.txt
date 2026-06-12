@@ -1,0 +1,38 @@
+# Onboarding Guide
+
+Welcome to the company! This guide will help you get set up in your first week.
+
+## Day 1
+
+1. Pick up your laptop from IT (Room 201)
+2. Complete HR paperwork in the benefits portal
+3. Set up your email and Slack accounts
+4. Meet your onboarding buddy
+
+## Week 1
+
+- Complete security awareness training (mandatory)
+- Set up development environment (see DevSetup wiki)
+- Attend team standup (daily at 9:30 AM)
+- Schedule 1:1 with your manager
+
+## First 30 Days
+
+- Complete all mandatory training modules
+- Submit your first pull request
+- Present a "lightning talk" at team meeting
+- Set quarterly goals with your manager
+
+## Key Resources
+
+- **Wiki:** wiki.company.com
+- **IT Help Desk:** help.company.com
+- **HR Portal:** hr.company.com
+- **Learning Platform:** learn.company.com
+
+## Important Policies
+
+- Code of Conduct (must acknowledge within 7 days)
+- Information Security Policy (must complete quiz)
+- Acceptable Use Policy (must sign)
+- Remote Work Policy (if applicable)
