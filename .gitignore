@@ -1,2 +1,11 @@
-src/.rag_audit_key
-src/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+*.egg
+dist/
+build/
+.coverage
+htmlcov/
+.rag_audit_key

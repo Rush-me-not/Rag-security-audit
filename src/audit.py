@@ -18,16 +18,16 @@ Usage:
 import argparse
 import base64
 import codecs
+import hashlib
 import html as html_mod
 import json
 import os
 import re
 import sys
-import hashlib
-from pathlib import Path
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Union, cast
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from pathlib import Path
+from typing import Optional, Union
 
 # --- Injection patterns to detect in documents ---
 
@@ -38,30 +38,30 @@ INJECTION_PATTERNS = [
     (r"forget\s+(everything|all)\s+(you|about)", "instruction_override", "HIGH"),
     (r"new\s+instructions?\s*:", "instruction_override", "HIGH"),
     (r"system\s*prompt\s*:", "instruction_override", "HIGH"),
-    
+
     # Role hijacking
     (r"you\s+are\s+now\s+", "role_hijack", "HIGH"),
     (r"act\s+as\s+(if|though)\s+you\s+(are|were)", "role_hijack", "MEDIUM"),
     (r"pretend\s+you\s+(are|'re)\s+", "role_hijack", "MEDIUM"),
     (r"from\s+now\s+on[,.]?\s+you\s+will", "role_hijack", "HIGH"),
-    
+
     # Output manipulation
     (r"respond\s+only\s+with", "output_control", "MEDIUM"),
     (r"output\s+(only\s+)?(?:the\s+)?(?:following|text)", "output_control", "MEDIUM"),
     (r"repeat\s+(after\s+me|the\s+following)", "output_control", "MEDIUM"),
     (r"say\s+(exactly|only|nothing\s+but)", "output_control", "MEDIUM"),
     (r"do\s+not\s+(mention|reveal|disclose|share)", "output_control", "MEDIUM"),
-    
+
     # Encoding/evasion attempts
     (r"base64[\s:]+", "encoding_evasion", "MEDIUM"),
     (r"rot13[\s:]+", "encoding_evasion", "MEDIUM"),
     (r"\\\\u[0-9a-fA-F]{4}", "encoding_evasion", "LOW"),
-    
+
     # Data exfiltration
     (r"send\s+(the\s+)?(contents?|data|info)\s+to", "exfiltration", "HIGH"),
     (r"post\s+(to|the\s+data)\s+(https?://|url)", "exfiltration", "HIGH"),
     (r"curl\s+(https?://|[-a-zA-Z0-9])", "exfiltration", "HIGH"),
-    
+
     # Prompt leaking
     (r"(reveal|show|print|display|output)\s+(your|the)\s+(system\s+)?prompt", "prompt_leak", "HIGH"),
     (r"what\s+(are|is)\s+your\s+(system\s+)?(prompt|instructions)", "prompt_leak", "MEDIUM"),
@@ -292,13 +292,13 @@ def load_documents(corpus_path: str) -> list[dict]:
     """Load all text documents from a directory."""
     docs = []
     corpus = Path(corpus_path)
-    
+
     if not corpus.exists():
         print(f"Error: Corpus path '{corpus_path}' does not exist.")
         sys.exit(1)
-    
+
     extensions = {".txt", ".md", ".rst", ".html", ".htm", ".json", ".yaml", ".yml", ".csv", ".log"}
-    
+
     for fpath in sorted(corpus.rglob("*")):
         if fpath.is_file() and fpath.suffix.lower() in extensions:
             try:
@@ -312,7 +312,7 @@ def load_documents(corpus_path: str) -> list[dict]:
                 })
             except Exception as e:
                 print(f"  Warning: Could not read {fpath}: {e}")
-    
+
     return docs
 
 
@@ -581,10 +581,10 @@ def scan_obfuscation_indicators(documents: list[dict]) -> list[Finding]:
 def scan_structural_anomalies(documents: list[dict]) -> list[Finding]:
     """Detect structural anomalies that may indicate injection."""
     findings = []
-    
+
     for doc in documents:
         content = doc["content"]
-        
+
         # Hidden text (white-on-white patterns)
         if "\x1b[" in content:
             findings.append(Finding(
@@ -596,7 +596,7 @@ def scan_structural_anomalies(documents: list[dict]) -> list[Finding]:
                 recommendation="Strip ANSI codes from documents before indexing.",
                 atlas_mapping=lookup_atlas("structural_ansi_codes")
             ))
-        
+
         # Excessive zero-width characters
         zwc_count = sum(1 for c in content if c in "\u200b\u200c\u200d\ufeff\u00ad")
         if zwc_count > 10:
@@ -609,7 +609,7 @@ def scan_structural_anomalies(documents: list[dict]) -> list[Finding]:
                 recommendation="Strip zero-width characters from documents before indexing.",
                 atlas_mapping=lookup_atlas("structural_zero_width")
             ))
-        
+
         # Suspiciously long lines (may hide payloads)
         long_lines = [(i+1, len(line)) for i, line in enumerate(content.split("\n")) if len(line) > 2000]
         if long_lines:
@@ -622,7 +622,7 @@ def scan_structural_anomalies(documents: list[dict]) -> list[Finding]:
                 recommendation="Review long lines for hidden payloads. Consider line-length limits in indexer.",
                 atlas_mapping=lookup_atlas("structural_long_lines")
             ))
-        
+
         # Document delimiter spoofing
         delimiters = ["---END OF DOCUMENT---", "===END===", "[SYSTEM]:", "[INST]", "<<SYS>>"]
         for delim in delimiters:
@@ -636,28 +636,28 @@ def scan_structural_anomalies(documents: list[dict]) -> list[Finding]:
                     recommendation="Sanitize or escape system delimiters in documents before indexing.",
                     atlas_mapping=lookup_atlas("structural_delimiter_spoof")
                 ))
-    
+
     return findings
 
 
 def scan_content_quality(documents: list[dict]) -> list[Finding]:
     """Detect content quality issues that could lead to hallucination or poisoning."""
     findings = []
-    
+
     suspicious_authority = [
         "ceo said", "official policy", "classified", "confidential memo",
         "directive from", "signed by", "authorized by", "mandated by",
     ]
-    
+
     urgent_language = [
         "immediately", "urgent", "critical update", "must comply",
         "failure to comply", "effective immediately", "no exceptions",
         "supersedes all", "overrides all",
     ]
-    
+
     for doc in documents:
         content_lower = doc["content"].lower()
-        
+
         # Authority claims without sourcing
         authority_hits = [term for term in suspicious_authority if term in content_lower]
         if len(authority_hits) >= 2:
@@ -670,7 +670,7 @@ def scan_content_quality(documents: list[dict]) -> list[Finding]:
                 recommendation="Verify document provenance. Add source citations. Flag for manual review.",
                 atlas_mapping=lookup_atlas("content_authority_spoof")
             ))
-        
+
         # Urgency manipulation
         urgency_hits = [term for term in urgent_language if term in content_lower]
         if len(urgency_hits) >= 3:
@@ -683,7 +683,7 @@ def scan_content_quality(documents: list[dict]) -> list[Finding]:
                 recommendation="Review for social engineering patterns. Urgency is a common manipulation tactic.",
                 atlas_mapping=lookup_atlas("content_urgency_manipulation")
             ))
-        
+
         # Contradictory instructions (simple heuristic)
         positive = content_lower.count("must ") + content_lower.count("required to ")
         negative = content_lower.count("must not ") + content_lower.count("do not ") + content_lower.count("prohibited")
@@ -696,7 +696,7 @@ def scan_content_quality(documents: list[dict]) -> list[Finding]:
                 recommendation="Resolve contradictory instructions. Ambiguity can be exploited for injection.",
                 atlas_mapping=lookup_atlas("content_contradiction")
             ))
-    
+
     return findings
 
 
@@ -705,20 +705,20 @@ def fuzz_injection(corpus_path: str, write_poisoned: bool = False) -> list[Findi
     findings = []
     corpus = Path(corpus_path)
     poison_dir = corpus / "_poisoned"
-    
+
     if write_poisoned:
         poison_dir.mkdir(exist_ok=True)
-    
+
     for template in POISON_TEMPLATES:
         doc_name = f"poison_{template['name']}.txt"
-        
+
         if write_poisoned:
             poison_path = poison_dir / doc_name
             poison_path.write_text(template["payload"], encoding="utf-8")
             location = str(poison_path)
         else:
             location = "(dry-run — not written)"
-        
+
         findings.append(Finding(
             category=f"fuzz_{template['category']}",
             severity=template["severity"],
@@ -728,7 +728,7 @@ def fuzz_injection(corpus_path: str, write_poisoned: bool = False) -> list[Findi
             recommendation="Test whether this payload gets retrieved and affects LLM responses.",
             atlas_mapping=lookup_atlas(f"fuzz_{template['category']}")
         ))
-    
+
     return findings
 
 
@@ -736,12 +736,12 @@ def fuzz_injection(corpus_path: str, write_poisoned: bool = False) -> list[Findi
 
 def scan_semantic_injection(documents: list[dict], llm_endpoint: str = None, llm_api_key: str = None) -> list[Finding]:
     """Use an LLM to detect semantic-level injection attempts that regex can't catch.
-    
+
     Gracefully degrades if no LLM endpoint is available.
     Default: DeepSeek API at api.deepseek.com (set RAG_AUDIT_LLM_KEY env var).
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     if not llm_endpoint:
         llm_endpoint = os.environ.get("RAG_AUDIT_LLM_ENDPOINT", "https://api.deepseek.com/v1/chat/completions")
@@ -856,12 +856,11 @@ DEFAULT_E2E_QUERIES = [
 
 def e2e_pipeline_test(corpus_path: str, queries: list[str] = None) -> list[Finding]:
     """End-to-end RAG pipeline test using pure-Python TF-IDF retrieval.
-    
+
     Tests whether poisoned documents get retrieved for legitimate queries.
     If they do, the RAG pipeline is vulnerable to retrieval poisoning.
     """
     import math
-    import re
 
     if not queries:
         queries = DEFAULT_E2E_QUERIES
@@ -965,7 +964,7 @@ def generate_report(report: AuditReport, output_format: str = "text") -> str:
     if output_format == "json":
         report_dict = asdict(report)
         return json.dumps(report_dict, indent=2)
-    
+
     lines = []
     lines.append("=" * 60)
     lines.append("  RAG SECURITY AUDIT REPORT")
@@ -976,7 +975,7 @@ def generate_report(report: AuditReport, output_format: str = "text") -> str:
     lines.append(f"  Findings:  {report.total_findings}")
     lines.append("=" * 60)
     lines.append("")
-    
+
     # Summary by severity
     sev_count = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
     cat_count = {}
@@ -984,23 +983,23 @@ def generate_report(report: AuditReport, output_format: str = "text") -> str:
         sev_count[f.severity] = sev_count.get(f.severity, 0) + 1
         cat = f.category.split("_")[0]
         cat_count[cat] = cat_count.get(cat, 0) + 1
-    
+
     lines.append("## SEVERITY BREAKDOWN")
     for sev in ["HIGH", "MEDIUM", "LOW"]:
         count = sev_count.get(sev, 0)
         marker = "🔴" if sev == "HIGH" else ("🟡" if sev == "MEDIUM" else "🟢")
         lines.append(f"  {marker} {sev}: {count}")
     lines.append("")
-    
+
     lines.append("## CATEGORY BREAKDOWN")
     for cat, count in sorted(cat_count.items(), key=lambda x: -x[1]):
         lines.append(f"  - {cat}: {count}")
     lines.append("")
-    
+
     # Detailed findings
     lines.append("## FINDINGS")
     lines.append("")
-    
+
     for i, f in enumerate(report.findings, 1):
         sev_icon = "🔴" if f.severity == "HIGH" else ("🟡" if f.severity == "MEDIUM" else "🟢")
         lines.append(f"  [{sev_icon} {f.severity}] #{i}: {f.description}")
@@ -1014,11 +1013,11 @@ def generate_report(report: AuditReport, output_format: str = "text") -> str:
         if f.recommendation:
             lines.append(f"    Fix:       {f.recommendation}")
         lines.append("")
-    
+
     # Recommendations
     lines.append("## TOP RECOMMENDATIONS")
     lines.append("")
-    
+
     if sev_count["HIGH"] > 0:
         lines.append("  ⚠️  HIGH severity findings require immediate attention:")
         high_findings = [f for f in report.findings if f.severity == "HIGH"]
@@ -1028,7 +1027,7 @@ def generate_report(report: AuditReport, output_format: str = "text") -> str:
                 lines.append(f"    - {f.recommendation}")
                 seen_recs.add(f.recommendation)
         lines.append("")
-    
+
     lines.append("  General hardening steps:")
     lines.append("    1. Sanitize all documents before indexing (strip ANSI, zero-width chars)")
     lines.append("    2. Implement content provenance tracking (signed sources)")
@@ -1037,7 +1036,7 @@ def generate_report(report: AuditReport, output_format: str = "text") -> str:
     lines.append("    5. Monitor for anomalous retrieval patterns in production")
     lines.append("")
     lines.append("=" * 60)
-    
+
     # MITRE ATLAS Coverage section
     atlas_counts = {}
     for f in report.findings:
@@ -1059,7 +1058,7 @@ def generate_report(report: AuditReport, output_format: str = "text") -> str:
         lines.append("")
 
     lines.append("=" * 60)
-    
+
     return "\n".join(lines)
 
 
@@ -1075,7 +1074,7 @@ Examples:
   python audit.py --corpus ./docs/ --fuzz-injection --write-poisoned
         """
     )
-    
+
     parser.add_argument("--corpus", required=True, help="Path to document corpus directory")
     parser.add_argument("--injection-scan", action="store_true", help="Scan for injection patterns (now with obfuscation-aware normalization)")
     parser.add_argument("--obfuscation-scan", action="store_true", help="Scan for obfuscation indicators (homoglyphs, zero-width, encoded blocks)")
@@ -1091,59 +1090,59 @@ Examples:
     parser.add_argument("--full-audit", action="store_true", help="Run all scans")
     parser.add_argument("--output", help="Output file path (default: stdout)")
     parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
-    
+
     args = parser.parse_args()
-    
+
     # Default to full audit if no specific scan selected
-    if not any([args.injection_scan, args.obfuscation_scan, args.structural_scan, args.quality_scan, 
+    if not any([args.injection_scan, args.obfuscation_scan, args.structural_scan, args.quality_scan,
                 args.fuzz_injection, args.semantic_scan, args.e2e_test, args.full_audit]):
         args.full_audit = True
-    
-    print(f"\n  RAG Security Audit Tool")
+
+    print("\n  RAG Security Audit Tool")
     print(f"  Scanning: {args.corpus}\n")
-    
+
     # Load documents
     documents = load_documents(args.corpus)
     print(f"  Loaded {len(documents)} documents\n")
-    
+
     if not documents:
         print("  No documents found. Check corpus path and file extensions.")
-        print(f"  Supported: .txt, .md, .rst, .html, .htm, .json, .yaml, .yml, .csv, .log")
+        print("  Supported: .txt, .md, .rst, .html, .htm, .json, .yaml, .yml, .csv, .log")
         sys.exit(1)
-    
+
     # Run scans
     all_findings = []
-    
+
     if args.full_audit or args.injection_scan:
         print("  [1/7] Scanning for injection patterns (obfuscation-aware)...")
         findings = scan_injection_patterns(documents)
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
-    
+
     if args.full_audit or args.obfuscation_scan:
         print("  [2/7] Scanning for obfuscation indicators...")
         findings = scan_obfuscation_indicators(documents)
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
-    
+
     if args.full_audit or args.structural_scan:
         print("  [3/7] Scanning for structural anomalies...")
         findings = scan_structural_anomalies(documents)
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
-    
+
     if args.full_audit or args.quality_scan:
         print("  [4/7] Scanning for content quality issues...")
         findings = scan_content_quality(documents)
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
-    
+
     if args.full_audit or args.fuzz_injection:
         print("  [5/7] Generating fuzzing payloads...")
         findings = fuzz_injection(args.corpus, write_poisoned=args.write_poisoned)
         all_findings.extend(findings)
         print(f"        Generated {len(findings)} payloads")
-    
+
     if (args.full_audit and args.llm_endpoint) or args.semantic_scan:
         print("  [6/7] Running semantic injection scan...")
         findings = scan_semantic_injection(documents, args.llm_endpoint, args.llm_api_key)
@@ -1151,14 +1150,14 @@ Examples:
         print(f"        Found {len(findings)} issues")
     elif args.semantic_scan and not args.llm_endpoint:
         print("  [6/7] Semantic scan skipped (no --llm-endpoint provided)")
-    
+
     if args.full_audit or args.e2e_test:
         print("  [7/7] Running end-to-end pipeline test...")
         queries = args.e2e_queries.split(",") if args.e2e_queries else None
         findings = e2e_pipeline_test(args.corpus, queries)
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
-    
+
     # Build report
     report = AuditReport(
         timestamp=datetime.now().isoformat(),
@@ -1172,10 +1171,10 @@ Examples:
             "low": sum(1 for f in all_findings if f.severity == "LOW"),
         }
     )
-    
+
     # Output
     output = generate_report(report, args.format)
-    
+
     if args.output:
         Path(args.output).write_text(output, encoding="utf-8")
         print(f"\n  Report saved to: {args.output}")
