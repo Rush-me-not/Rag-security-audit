@@ -6,21 +6,27 @@ Audits RAG (Retrieval-Augmented Generation) pipelines for:
   1. Context injection — malicious instructions hidden in retrieved documents
   2. Retrieval poisoning — adversarial docs that hijack retrieval ranking
   3. Hallucination — LLM answers not grounded in retrieved context
+  4. Obfuscation evasion — homoglyphs, zero-width chars, encoded payloads
 
 Usage:
     python audit.py --corpus ./docs/ --query "What is our refund policy?"
     python audit.py --corpus ./docs/ --fuzz-injection
+    python audit.py --corpus ./docs/ --obfuscation-scan
     python audit.py --corpus ./docs/ --full-audit
 """
 
 import argparse
+import base64
+import codecs
+import html as html_mod
 import json
 import os
+import re
 import sys
 import hashlib
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Optional, Union, cast
 from datetime import datetime
 
 # --- Injection patterns to detect in documents ---
@@ -138,7 +144,34 @@ ATLAS_TECHNIQUES = {
     "e2e_retrieval": {"technique": "AML.T0040", "name": "Data Poisoning", "tactic": "Resource Development", "url": "https://atlas.mitre.org/techniques/AML.T0040"},
     "fuzz_context_injection": {"technique": "AML.T0055", "name": "LLM Prompt Injection", "tactic": "Initial Access", "url": "https://atlas.mitre.org/techniques/AML.T0055"},
     "fuzz_retrieval_poisoning": {"technique": "AML.T0040", "name": "Data Poisoning", "tactic": "Resource Development", "url": "https://atlas.mitre.org/techniques/AML.T0040"},
+    "obfuscation_homoglyph": {"technique": "AML.T0010", "name": "Obfuscated Files or Information", "tactic": "Defense Evasion", "url": "https://atlas.mitre.org/techniques/AML.T0010"},
+    "obfuscation_zero_width": {"technique": "AML.T0010", "name": "Obfuscated Files or Information", "tactic": "Defense Evasion", "url": "https://atlas.mitre.org/techniques/AML.T0010"},
+    "obfuscation_encoded_block": {"technique": "AML.T0010", "name": "Obfuscated Files or Information", "tactic": "Defense Evasion", "url": "https://atlas.mitre.org/techniques/AML.T0010"},
+    "obfuscation_html_entity": {"technique": "AML.T0010", "name": "Obfuscated Files or Information", "tactic": "Defense Evasion", "url": "https://atlas.mitre.org/techniques/AML.T0010"},
 }
+
+# --- Unicode Homoglyph Mapping ---
+# Cyrillic and other lookalike characters mapped to their ASCII equivalents
+
+HOMOGLYPH_MAP = {
+    ord('а'): 'a',  # Cyrillic small a
+    ord('е'): 'e',  # Cyrillic small ie
+    ord('о'): 'o',  # Cyrillic small o
+    ord('с'): 'c',  # Cyrillic small es
+    ord('р'): 'p',  # Cyrillic small er
+    ord('х'): 'x',  # Cyrillic small ha
+    ord('у'): 'y',  # Cyrillic small u
+    ord('і'): 'i',  # Cyrillic small byelorussian-ukrainian i
+    ord('ԁ'): 'd',  # Cyrillic small komi de
+    ord('ѕ'): 's',  # Cyrillic small dze
+}
+
+# Zero-width characters to strip
+ZERO_WIDTH_CHARS = '\u200b\u200c\u200d\ufeff'
+
+# Unicode tag characters and RTL override ranges
+TAG_CHARS_RANGE = range(0xE0000, 0xE007F + 1)
+RTL_OVERRIDE_CHARS = '\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069'
 
 
 def lookup_atlas(category: str) -> Optional[dict]:
@@ -158,6 +191,77 @@ def lookup_atlas(category: str) -> Optional[dict]:
         if key.startswith(first_token):
             return val
     return None
+
+
+def normalize_text(text: str, detect_anomalies: bool = False) -> Union[str, tuple]:
+    """Normalize text by removing Unicode obfuscation.
+
+    Performs:
+      1. Maps Unicode homoglyphs (Cyrillic lookalikes) to ASCII equivalents
+      2. Strips zero-width characters (U+200B, U+200C, U+200D, U+FEFF)
+      3. Decodes HTML entities (&amp; -> &, &#x41; -> A, etc.)
+      4. Removes Unicode tag characters (U+E0000-U+E007F)
+      5. Removes RTL override characters (U+202A-U+202E, U+2066-U+2069)
+
+    Args:
+        text: Input text to normalize
+        detect_anomalies: If True, returns (normalized, anomalies_dict) tuple
+
+    Returns:
+        If detect_anomalies=False: normalized string
+        If detect_anomalies=True: (normalized_string, dict with anomaly counts)
+    """
+    anomalies = {
+        "homoglyphs_found": 0,
+        "zero_width_found": 0,
+        "html_entities_found": 0,
+        "tag_chars_found": 0,
+        "rtl_overrides_found": 0,
+    }
+
+    normalized = text
+
+    # Step 1: Detect and replace homoglyphs
+    homoglyph_count = 0
+    chars = list(normalized)
+    for i, ch in enumerate(chars):
+        if ord(ch) in HOMOGLYPH_MAP:
+            chars[i] = HOMOGLYPH_MAP[ord(ch)]
+            homoglyph_count += 1
+    normalized = ''.join(chars)
+    anomalies["homoglyphs_found"] = homoglyph_count
+
+    # Step 2: Detect and strip zero-width characters
+    zw_count = sum(1 for c in normalized if c in ZERO_WIDTH_CHARS)
+    if zw_count > 0:
+        normalized = ''.join(c for c in normalized if c not in ZERO_WIDTH_CHARS)
+    anomalies["zero_width_found"] = zw_count
+
+    # Step 3: Decode HTML entities
+    entity_count = 0
+    # Count HTML entities before decoding
+    entity_pattern = re.compile(r'&(?:[a-zA-Z]+|#\d+|#x[0-9a-fA-F]+);')
+    entity_count = len(entity_pattern.findall(normalized))
+    if entity_count > 0:
+        normalized = html_mod.unescape(normalized)
+    anomalies["html_entities_found"] = entity_count
+
+    # Step 4: Remove Unicode tag characters (U+E0000-U+E007F)
+    tag_count = sum(1 for c in normalized if ord(c) in TAG_CHARS_RANGE)
+    if tag_count > 0:
+        normalized = ''.join(c for c in normalized if ord(c) not in TAG_CHARS_RANGE)
+    anomalies["tag_chars_found"] = tag_count
+
+    # Step 5: Remove RTL override characters
+    rtl_count = sum(1 for c in normalized if c in RTL_OVERRIDE_CHARS)
+    if rtl_count > 0:
+        normalized = ''.join(c for c in normalized if c not in RTL_OVERRIDE_CHARS)
+    anomalies["rtl_overrides_found"] = rtl_count
+
+    if detect_anomalies:
+        return normalized, anomalies
+    return normalized
+
 
 
 @dataclass
@@ -213,21 +317,34 @@ def load_documents(corpus_path: str) -> list[dict]:
 
 
 def scan_injection_patterns(documents: list[dict]) -> list[Finding]:
-    """Scan documents for known injection patterns."""
-    import re
+    """Scan documents for known injection patterns.
+
+    Scans both raw text and normalized text (homoglyphs resolved, zero-width
+    stripped, HTML entities decoded). When a pattern is found in normalized
+    text but not in raw text, an obfuscation finding is also emitted.
+    """
     findings = []
-    
+
     for doc in documents:
         content_lower = doc["content"].lower()
+        content_normalized = normalize_text(doc["content"])
+        content_normalized_lower = content_normalized.lower()
         lines = doc["content"].split("\n")
-        
+
         for pattern, category, severity in INJECTION_PATTERNS:
-            matches = list(re.finditer(pattern, content_lower))
-            for match in matches:
-                # Find the line number
+            raw_matches = list(re.finditer(pattern, content_lower))
+            norm_matches = list(re.finditer(pattern, content_normalized_lower))
+
+            # Deduplicate: only count norm matches that are NOT found in raw
+            raw_spans = set()
+            for m in raw_matches:
+                raw_spans.add((m.start(), m.end()))
+
+            # Report raw matches as usual
+            for match in raw_matches:
                 line_num = content_lower[:match.start()].count("\n") + 1
                 line_content = lines[line_num - 1].strip() if line_num <= len(lines) else ""
-                
+
                 cat_name = f"injection_{category}"
                 findings.append(Finding(
                     category=cat_name,
@@ -238,7 +355,226 @@ def scan_injection_patterns(documents: list[dict]) -> list[Finding]:
                     recommendation="Review document for adversarial content. Remove or sanitize before indexing.",
                     atlas_mapping=lookup_atlas(cat_name)
                 ))
-    
+
+            # Report obfuscated matches (found in normalized but not raw)
+            for match in norm_matches:
+                span = (match.start(), match.end())
+                if span not in raw_spans:
+                    matched_text = content_normalized_lower[match.start():match.end()]
+                    cat_name = f"injection_{category}"
+                    findings.append(Finding(
+                        category=cat_name,
+                        severity=severity,
+                        description=f"Detected OBFUSCATED {category.replace('_', ' ')} pattern (found after text normalization)",
+                        location=f"{doc['path']}:~{match.start()}",
+                        evidence=f"Normalized match: '{matched_text}'",
+                        recommendation="Document uses obfuscation to evade detection. Sanitize before indexing.",
+                        atlas_mapping=lookup_atlas(cat_name)
+                    ))
+                    # Also emit a dedicated obfuscation indicator finding
+                    findings.append(Finding(
+                        category="obfuscation_homoglyph",
+                        severity=severity,
+                        description=f"Obfuscation detected masking {category.replace('_', ' ')} pattern — text differs after normalization",
+                        location=doc["path"],
+                        evidence=f"Pattern '{pattern}' matched only after Unicode normalization",
+                        recommendation="Strip Unicode homoglyphs, zero-width characters, and HTML entities before indexing.",
+                        atlas_mapping=lookup_atlas("obfuscation_homoglyph")
+                    ))
+
+    return findings
+
+
+_INJECTION_KEYWORDS = [
+    "ignore", "previous", "instructions", "system prompt", "you are now",
+    "disregard", "forget", "pretend", "override", "output only",
+    "respond only", "do not mention", "reveal", "send the", "exfil",
+    "password", "curl", "http", "classified", "confidential",
+]
+
+
+def _rot13_decode(text: str) -> str:
+    """Decode ROT13 text to plaintext."""
+    return codecs.encode(text, 'rot_13')
+
+
+def _is_base64_like(s: str) -> bool:
+    """Check if a string looks like a base64-encoded block."""
+    return bool(re.fullmatch(r'[A-Za-z0-9+/]{20,}={0,2}', s))
+
+
+def _extract_encoded_blocks(text: str) -> list[tuple[str, str]]:
+    """Extract candidate encoded blocks (base64, hex) from text.
+
+    Returns list of (encoding_type, decoded_text) tuples.
+    """
+    blocks = []
+
+    # Base64 candidate blocks: runs of 20+ base64 chars
+    for match in re.finditer(r'[A-Za-z0-9+/]{20,}={0,2}', text):
+        candidate = match.group(0)
+        # Try decoding
+        try:
+            decoded = base64.b64decode(candidate, validate=True).decode('utf-8', errors='replace')
+            if len(decoded) > 4:  # meaningful decoded text
+                blocks.append(('base64', decoded))
+        except Exception:
+            pass
+
+    # ROT13-labeled blocks: look for "rot13:" prefix or rot13-marked content
+    for match in re.finditer(r'(?:rot13|rot_13|rot-13)\s*[:=]\s*(\S+)', text, re.IGNORECASE):
+        candidate = match.group(1)
+        if len(candidate) > 4:
+            blocks.append(('rot13', _rot13_decode(candidate)))
+
+    # Hex-encoded blocks: \xNN sequences
+    hex_matches = re.findall(r'(?:\\x[0-9a-fA-F]{2}){3,}', text)
+    for hex_str in hex_matches:
+        try:
+            decoded = re.sub(r'\\x([0-9a-fA-F]{2})',
+                            lambda m: chr(int(m.group(1), 16)),
+                            hex_str)
+            if len(decoded) > 4:
+                blocks.append(('hex', decoded))
+        except Exception:
+            pass
+
+    # Also look for raw hex strings (40+ hex chars, space-separated)
+    for match in re.finditer(r'(?:[0-9a-fA-F]{2}\s+){5,}[0-9a-fA-F]{2}', text):
+        candidate = match.group(0)
+        try:
+            decoded = bytes.fromhex(candidate).decode('utf-8', errors='replace')
+            if len(decoded) > 4:
+                blocks.append(('hex_raw', decoded))
+        except Exception:
+            pass
+
+    return blocks
+
+
+def scan_obfuscation_indicators(documents: list[dict]) -> list[Finding]:
+    """Detect obfuscation techniques used to evade regex-based scanners.
+
+    Flags:
+      - Homoglyph substitution (text differs after normalization)
+      - Zero-width character injection (steganographic hiding)
+      - Base64/ROT13/Hex encoded blocks containing injection keywords
+      - HTML entity encoding of attack strings
+
+    Each finding mapped to MITRE ATLAS AML.T0010 (Obfuscated Files or Information).
+    """
+    findings = []
+
+    for doc in documents:
+        content = doc["content"]
+
+        # --- Homoglyph detection ---
+        result = normalize_text(content, detect_anomalies=True)
+        normalized: str = result[0]  # type: ignore[index]
+        anomalies: dict = result[1]  # type: ignore[index]
+
+        if anomalies["homoglyphs_found"] > 0:
+            findings.append(Finding(
+                category="obfuscation_homoglyph",
+                severity="MEDIUM",
+                description=f"Homoglyph substitution detected — {anomalies['homoglyphs_found']} "
+                            f"Unicode lookalike characters replaced during normalization",
+                location=doc["path"],
+                evidence=f"{anomalies['homoglyphs_found']} homoglyph characters mapping to ASCII equivalents",
+                recommendation="Strip Unicode homoglyphs from documents before indexing to prevent obfuscation-based evasion.",
+                atlas_mapping=lookup_atlas("obfuscation_homoglyph")
+            ))
+
+        if anomalies["tag_chars_found"] > 0:
+            findings.append(Finding(
+                category="obfuscation_homoglyph",
+                severity="MEDIUM",
+                description=f"Unicode tag characters detected — {anomalies['tag_chars_found']} "
+                            f"hidden formatting characters removed during normalization",
+                location=doc["path"],
+                evidence=f"{anomalies['tag_chars_found']} Unicode tag characters (U+E0000-U+E007F)",
+                recommendation="Strip Unicode tag characters from documents before indexing.",
+                atlas_mapping=lookup_atlas("obfuscation_homoglyph")
+            ))
+
+        if anomalies["rtl_overrides_found"] > 0:
+            findings.append(Finding(
+                category="obfuscation_homoglyph",
+                severity="MEDIUM",
+                description=f"RTL override characters detected — {anomalies['rtl_overrides_found']} "
+                            f"bidirectional text control characters removed during normalization",
+                location=doc["path"],
+                evidence=f"{anomalies['rtl_overrides_found']} RTL/bidi override characters",
+                recommendation="Strip RTL override characters from documents to prevent text-order attacks.",
+                atlas_mapping=lookup_atlas("obfuscation_homoglyph")
+            ))
+
+        # --- Zero-width character injection ---
+        if anomalies["zero_width_found"] > 0:
+            findings.append(Finding(
+                category="obfuscation_zero_width",
+                severity="MEDIUM",
+                description=f"Zero-width character injection — {anomalies['zero_width_found']} "
+                            f"invisible Unicode characters detected",
+                location=doc["path"],
+                evidence=f"{anomalies['zero_width_found']} zero-width characters "
+                         f"(U+200B/U+200C/U+200D/U+FEFF) found",
+                recommendation="Strip zero-width characters from documents before indexing. "
+                             "These are commonly used for steganography and keyword splitting.",
+                atlas_mapping=lookup_atlas("obfuscation_zero_width")
+            ))
+
+        # --- HTML entity encoding ---
+        if anomalies["html_entities_found"] > 0:
+            # Check if decoded text contains injection keywords
+            decoded_lower = normalized.lower()
+            decoded_hits = [kw for kw in _INJECTION_KEYWORDS if kw in decoded_lower]
+
+            if decoded_hits:
+                findings.append(Finding(
+                    category="obfuscation_html_entity",
+                    severity="HIGH",
+                    description=f"HTML entity-encoded attack strings detected — "
+                                f"{anomalies['html_entities_found']} entities decoded, "
+                                f"revealing injection keywords: {', '.join(decoded_hits[:5])}",
+                    location=doc["path"],
+                    evidence=f"Decoded content contains: {', '.join(decoded_hits[:5])}",
+                    recommendation="Decode HTML entities before scanning. Entity encoding "
+                                 "is a common obfuscation technique to bypass regex scanners.",
+                    atlas_mapping=lookup_atlas("obfuscation_html_entity")
+                ))
+            elif anomalies["html_entities_found"] > 20:
+                # High entity count is suspicious even without keyword hits
+                findings.append(Finding(
+                    category="obfuscation_html_entity",
+                    severity="LOW",
+                    description=f"Excessive HTML entities detected — "
+                                f"{anomalies['html_entities_found']} entities found",
+                    location=doc["path"],
+                    evidence=f"{anomalies['html_entities_found']} HTML entities in document",
+                    recommendation="Investigate high entity count. May indicate obfuscation attempt.",
+                    atlas_mapping=lookup_atlas("obfuscation_html_entity")
+                ))
+
+        # --- Encoded block detection (base64, rot13, hex) ---
+        encoded_blocks = _extract_encoded_blocks(content)
+        for enc_type, decoded in encoded_blocks:
+            decoded_lower = decoded.lower()
+            decoded_hits = [kw for kw in _INJECTION_KEYWORDS if kw in decoded_lower]
+
+            if decoded_hits:
+                findings.append(Finding(
+                    category="obfuscation_encoded_block",
+                    severity="HIGH",
+                    description=f"{enc_type.upper()}-encoded block found containing "
+                                f"injection keywords: {', '.join(decoded_hits[:5])}",
+                    location=doc["path"],
+                    evidence=f"Decoded {enc_type} content: {decoded[:150]}",
+                    recommendation=f"Decode {enc_type} blocks before scanning. "
+                                 "Encoded payloads are a common evasion technique.",
+                    atlas_mapping=lookup_atlas("obfuscation_encoded_block")
+                ))
+
     return findings
 
 
@@ -741,7 +1077,8 @@ Examples:
     )
     
     parser.add_argument("--corpus", required=True, help="Path to document corpus directory")
-    parser.add_argument("--injection-scan", action="store_true", help="Scan for injection patterns")
+    parser.add_argument("--injection-scan", action="store_true", help="Scan for injection patterns (now with obfuscation-aware normalization)")
+    parser.add_argument("--obfuscation-scan", action="store_true", help="Scan for obfuscation indicators (homoglyphs, zero-width, encoded blocks)")
     parser.add_argument("--structural-scan", action="store_true", help="Scan for structural anomalies")
     parser.add_argument("--quality-scan", action="store_true", help="Scan for content quality issues")
     parser.add_argument("--fuzz-injection", action="store_true", help="Generate fuzzing payloads to test retrieval")
@@ -758,7 +1095,7 @@ Examples:
     args = parser.parse_args()
     
     # Default to full audit if no specific scan selected
-    if not any([args.injection_scan, args.structural_scan, args.quality_scan, 
+    if not any([args.injection_scan, args.obfuscation_scan, args.structural_scan, args.quality_scan, 
                 args.fuzz_injection, args.semantic_scan, args.e2e_test, args.full_audit]):
         args.full_audit = True
     
@@ -778,39 +1115,45 @@ Examples:
     all_findings = []
     
     if args.full_audit or args.injection_scan:
-        print("  [1/6] Scanning for injection patterns...")
+        print("  [1/7] Scanning for injection patterns (obfuscation-aware)...")
         findings = scan_injection_patterns(documents)
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
     
+    if args.full_audit or args.obfuscation_scan:
+        print("  [2/7] Scanning for obfuscation indicators...")
+        findings = scan_obfuscation_indicators(documents)
+        all_findings.extend(findings)
+        print(f"        Found {len(findings)} issues")
+    
     if args.full_audit or args.structural_scan:
-        print("  [2/6] Scanning for structural anomalies...")
+        print("  [3/7] Scanning for structural anomalies...")
         findings = scan_structural_anomalies(documents)
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
     
     if args.full_audit or args.quality_scan:
-        print("  [3/6] Scanning for content quality issues...")
+        print("  [4/7] Scanning for content quality issues...")
         findings = scan_content_quality(documents)
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
     
     if args.full_audit or args.fuzz_injection:
-        print("  [4/6] Generating fuzzing payloads...")
+        print("  [5/7] Generating fuzzing payloads...")
         findings = fuzz_injection(args.corpus, write_poisoned=args.write_poisoned)
         all_findings.extend(findings)
         print(f"        Generated {len(findings)} payloads")
     
     if (args.full_audit and args.llm_endpoint) or args.semantic_scan:
-        print("  [5/6] Running semantic injection scan...")
+        print("  [6/7] Running semantic injection scan...")
         findings = scan_semantic_injection(documents, args.llm_endpoint, args.llm_api_key)
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
     elif args.semantic_scan and not args.llm_endpoint:
-        print("  [5/6] Semantic scan skipped (no --llm-endpoint provided)")
+        print("  [6/7] Semantic scan skipped (no --llm-endpoint provided)")
     
     if args.full_audit or args.e2e_test:
-        print("  [6/6] Running end-to-end pipeline test...")
+        print("  [7/7] Running end-to-end pipeline test...")
         queries = args.e2e_queries.split(",") if args.e2e_queries else None
         findings = e2e_pipeline_test(args.corpus, queries)
         all_findings.extend(findings)
