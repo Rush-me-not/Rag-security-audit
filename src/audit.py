@@ -1224,6 +1224,47 @@ def generate_report(report: AuditReport, output_format: str = "text") -> str:
     lines.append("")
     lines.append("=" * 60)
 
+    # --- TD Enhancement: Statistical Ensemble Risk Scoring ---
+    if report.risk_results:
+        lines.append("## STATISTICAL ENSEMBLE RISK SCORES")
+        lines.append("")
+        flagged = [r for r in report.risk_results if r.get("decision", "SAFE") != "SAFE"]
+        lines.append(f"  Documents scored: {len(report.risk_results)} | "
+                     f"Flagged: {len(flagged)}")
+        lines.append("")
+        # Top 10 highest-risk documents
+        ranked = sorted(report.risk_results, key=lambda r: -r.get("risk_score", 0.0))
+        for r in ranked[:10]:
+            score = r.get("risk_score", 0.0)
+            decision = r.get("decision", "SAFE")
+            layers = r.get("triggered_layers", [])
+            icon = "🔴" if decision == "MALICIOUS" else ("🟡" if decision == "SUSPICIOUS" else "🟢")
+            layer_str = ", ".join(layers) if layers else "-"
+            lines.append(f"  {icon} {decision:<11} {score:.3f}  {r.get('doc_name', '?')}  [{layer_str}]")
+        lines.append("")
+
+    # --- TD Enhancement: Ablation Study ---
+    if report.ablation:
+        lines.append("## ABLATION STUDY (per-layer contribution)")
+        lines.append("")
+        ab = report.ablation
+        lines.append(f"  Baseline flagged docs: {ab.get('baseline_flagged', 0)} | "
+                     f"Baseline mean risk: {ab.get('baseline_mean_risk', 0.0):.4f}")
+        lines.append("")
+        lines.append("  Ranked by detection contribution (flagged-doc delta):")
+        ranking = ab.get("ranking", [])
+        layers = ab.get("layers", {})
+        for rank, layer in enumerate(ranking, 1):
+            info = layers.get(layer, {})
+            lines.append(
+                f"    {rank}. {layer:<12} Δflagged={info.get('flagged_delta', 0)} "
+                f"Δrisk={info.get('mean_risk_delta', 0.0):+.4f} "
+                f"({info.get('contribution_pct', 0.0)}%)"
+            )
+        lines.append("")
+
+    lines.append("=" * 60)
+
     # MITRE ATLAS Coverage section
     atlas_counts = {}
     for f in report.findings:
@@ -1363,6 +1404,23 @@ Examples:
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
 
+    # Statistical ensemble risk scoring (TD enhancement)
+    risk_results: list = []
+    ablation: dict = {}
+    if args.full_audit or args.risk_scan or args.ablation:
+        print("  [8/8] Computing statistical ensemble risk scores...")
+        risk_results = score_risk(documents, weights=None, threshold=args.risk_threshold)
+        flagged = sum(1 for r in risk_results if r.decision != "SAFE")
+        print(f"        Flagged {flagged}/{len(risk_results)} documents "
+              f"(threshold {args.risk_threshold})")
+
+    # Ablation study (TD enhancement) — measure per-layer contribution
+    if args.full_audit or args.ablation:
+        print("  [8b] Running ablation study (per-layer contribution)...")
+        ablation = run_ablation(documents, weights=None)
+        baseline = ablation.get("baseline_flagged", 0)
+        print(f"        Baseline flagged {baseline} documents")
+
     # Build report
     report = AuditReport(
         timestamp=datetime.now().isoformat(),
@@ -1374,7 +1432,9 @@ Examples:
             "high": sum(1 for f in all_findings if f.severity == "HIGH"),
             "medium": sum(1 for f in all_findings if f.severity == "MEDIUM"),
             "low": sum(1 for f in all_findings if f.severity == "LOW"),
-        }
+        },
+        risk_results=[asdict(r) for r in risk_results],
+        ablation=ablation,
     )
 
     # Output
