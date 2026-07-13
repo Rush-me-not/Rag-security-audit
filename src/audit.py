@@ -29,6 +29,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 
+from info_theory import (
+    character_uniformity,
+    compression_ratio,
+    cosine_similarity,
+    detect_corpus_outliers,
+    detect_near_duplicates,
+    jaccard_similarity,
+    ngram_surprisal,
+    shannon_entropy,
+    tokenize,
+)
+from scoring import AblationStudy, EnsembleScorer, LayerSignal
+
 # --- Injection patterns to detect in documents ---
 
 INJECTION_PATTERNS = [
@@ -286,6 +299,8 @@ class AuditReport:
     findings: list = field(default_factory=list)
     poisoned_documents: list = field(default_factory=list)
     summary: dict = field(default_factory=dict)
+    risk_results: list = field(default_factory=list)
+    ablation: dict = field(default_factory=dict)
 
 
 def load_documents(corpus_path: str) -> list[dict]:
@@ -959,6 +974,178 @@ def e2e_pipeline_test(corpus_path: str, queries: list[str] = None) -> list[Findi
     return findings
 
 
+# --- TD Enhancement: Information-Theoretic & Similarity-Based Detection ---
+
+# Entropy / compression thresholds used to flag anomalous documents.
+ENTROPY_HIGH = 4.5          # bits/char — near-random content
+COMP_RATIO_LOW = 0.30       # highly repetitive / templated payloads
+UNIFORMITY_HIGH = 0.85      # near-uniform char distribution (encoded blocks)
+NGRAM_SURPRISAL_HIGH = 4.5  # unpredictable character sequences
+
+
+def scan_info_theory(documents: list[dict]) -> list[Finding]:
+    """Flag documents with anomalous information-theoretic profiles.
+
+    Detects:
+      - High Shannon entropy (random padding / encoded payloads)
+      - Low compression ratio (repetitive templated injection)
+      - Near-uniform character distribution (obfuscated/encoded text)
+      - High n-gram surprisal (unusual character transitions)
+    """
+    findings = []
+
+    for doc in documents:
+        content = doc["content"]
+        if not content.strip():
+            continue
+
+        entropy = shannon_entropy(content)
+        ratio = compression_ratio(content)
+        uniformity = character_uniformity(content)
+        surprisal = ngram_surprisal(content)
+
+        if entropy >= ENTROPY_HIGH:
+            findings.append(Finding(
+                category="info_theory_high_entropy",
+                severity="MEDIUM",
+                description=f"High character entropy ({entropy:.2f} bits/char) — possible random padding or encoded payload",
+                location=doc["path"],
+                evidence=f"Shannon entropy {entropy:.2f} >= threshold {ENTROPY_HIGH}",
+                recommendation="Inspect for base64/randomized payloads or padding used to dilute scanner signals.",
+                atlas_mapping=lookup_atlas("obfuscation_encoded_block")
+            ))
+
+        if ratio <= COMP_RATIO_LOW:
+            findings.append(Finding(
+                category="info_theory_low_compression",
+                severity="LOW",
+                description=f"Low compression ratio ({ratio:.2f}) — highly repetitive / templated content",
+                location=doc["path"],
+                evidence=f"zlib ratio {ratio:.2f} <= threshold {COMP_RATIO_LOW}",
+                recommendation="Review for padded or templated injection payloads designed to evade frequency analysis.",
+                atlas_mapping=lookup_atlas("content_contradiction")
+            ))
+
+        if uniformity >= UNIFORMITY_HIGH:
+            findings.append(Finding(
+                category="info_theory_uniform",
+                severity="LOW",
+                description=f"Near-uniform character distribution ({uniformity:.2f}) — possible encoded/obfuscated text",
+                location=doc["path"],
+                evidence=f"Character uniformity {uniformity:.2f} >= threshold {UNIFORMITY_HIGH}",
+                recommendation="Inspect for encoded blocks whose character distribution resembles random data.",
+                atlas_mapping=lookup_atlas("obfuscation_encoded_block")
+            ))
+
+        if surprisal >= NGRAM_SURPRISAL_HIGH:
+            findings.append(Finding(
+                category="info_theory_surprisal",
+                severity="LOW",
+                description=f"High n-gram surprisal ({surprisal:.2f} bits) — unpredictable character transitions",
+                location=doc["path"],
+                evidence=f"n-gram surprisal {surprisal:.2f} >= threshold {NGRAM_SURPRISAL_HIGH}",
+                recommendation="Review for adversarial character sequences or obfuscated payloads.",
+                atlas_mapping=lookup_atlas("obfuscation_homoglyph")
+            ))
+
+    return findings
+
+
+def scan_similarity(documents: list[dict], duplicate_threshold: float = 0.85,
+                    outlier_threshold: float = 0.25, metric: str = "cosine") -> list[Finding]:
+    """Flag near-duplicate documents and corpus outliers via similarity.
+
+    Near-duplicates often indicate templated poisoning campaigns; outliers
+    can be steganographic payloads unrelated to the corpus topic.
+    """
+    findings = []
+
+    if len(documents) < 2:
+        return findings
+
+    doc_views = [{"name": d["name"], "content": d["content"]} for d in documents]
+
+    pairs = detect_near_duplicates(doc_views, threshold=duplicate_threshold, metric=metric)
+    for i, j, sim in pairs:
+        findings.append(Finding(
+            category="similarity_near_duplicate",
+            severity="MEDIUM",
+            description=f"Near-duplicate documents detected (similarity {sim:.3f})",
+            location=f"{documents[i]['path']} <> {documents[j]['path']}",
+            evidence=f"{documents[i]['name']} <> {documents[j]['name']} ({metric} sim {sim:.3f})",
+            recommendation="Verify provenance of duplicated documents — templated poisoning often reuses payloads.",
+            atlas_mapping=lookup_atlas("retrieval_poisoning")
+        ))
+
+    outliers = detect_corpus_outliers(doc_views, threshold=outlier_threshold, metric=metric)
+    for idx, best_sim in outliers:
+        findings.append(Finding(
+            category="similarity_outlier",
+            severity="LOW",
+            description=f"Corpus outlier — document dissimilar to all others (max sim {best_sim:.3f})",
+            location=documents[idx]["path"],
+            evidence=f"{documents[idx]['name']} max similarity {best_sim:.3f} < {outlier_threshold}",
+            recommendation="Review outlier document for topic mismatch or injected off-topic payload.",
+            atlas_mapping=lookup_atlas("retrieval_poisoning")
+        ))
+
+    return findings
+
+
+# --- TD Enhancement: Statistical Ensemble Risk Scoring ---
+
+def build_layer_signals(documents: list[dict], scorer: EnsembleScorer = None) -> list[dict]:
+    """Build per-document layer signals from all detection layers.
+
+    Returns a corpus of {"name", "signals": [LayerSignal, ...]} dicts ready
+    for ``EnsembleScorer.score_corpus``.
+    """
+    injection = scan_injection_patterns(documents)
+    obfuscation = scan_obfuscation_indicators(documents)
+    structural = scan_structural_anomalies(documents)
+    quality = scan_content_quality(documents)
+    info = scan_info_theory(documents)
+    similarity = scan_similarity(documents)
+
+    layer_findings = {
+        "injection": injection,
+        "obfuscation": obfuscation,
+        "structural": structural,
+        "quality": quality,
+        "info_theory": info,
+        "similarity": similarity,
+    }
+
+    corpus = []
+    for doc in documents:
+        dpath = doc["path"]
+        signals = []
+        for layer, findings in layer_findings.items():
+            sev = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+            for f in findings:
+                loc = (f.location or "").split(":")[0]
+                if loc == dpath or dpath.endswith(loc) or loc.endswith(doc["name"]):
+                    sev[f.severity] = sev.get(f.severity, 0) + 1
+            signals.append(LayerSignal(layer=layer, severity_counts=sev))
+        corpus.append({"name": doc["name"], "signals": signals})
+    return corpus
+
+
+def score_risk(documents: list[dict], weights: dict = None, threshold: float = 0.5) -> list:
+    """Compute ensemble risk scores for every document in the corpus."""
+    scorer = EnsembleScorer(weights=weights, threshold=threshold)
+    corpus = build_layer_signals(documents, scorer)
+    return scorer.score_corpus(corpus)
+
+
+def run_ablation(documents: list[dict], weights: dict = None) -> dict:
+    """Run an ablation study measuring each layer's contribution to detection."""
+    scorer = EnsembleScorer(weights=weights)
+    corpus = build_layer_signals(documents, scorer)
+    study = AblationStudy(scorer)
+    return study.run(corpus)
+
+
 def generate_report(report: AuditReport, output_format: str = "text") -> str:
     """Generate the audit report."""
     if output_format == "json":
@@ -1087,6 +1274,11 @@ Examples:
     parser.add_argument("--llm-api-key", help="LLM API key (default: $RAG_AUDIT_LLM_KEY or 'ollama')")
     parser.add_argument("--e2e-test", action="store_true", help="End-to-end RAG pipeline test (TF-IDF retrieval)")
     parser.add_argument("--e2e-queries", help="Custom queries for e2e test (comma-separated)")
+    parser.add_argument("--info-theory-scan", action="store_true", help="Information-theoretic anomaly detection (entropy/compression)")
+    parser.add_argument("--similarity-scan", action="store_true", help="Similarity-based detection (cosine/Jaccard near-dupes, outliers)")
+    parser.add_argument("--risk-scan", action="store_true", help="Statistical ensemble risk scoring (sigmoid weighted ensemble)")
+    parser.add_argument("--ablation", action="store_true", help="Run ablation study measuring per-layer contribution")
+    parser.add_argument("--risk-threshold", type=float, default=0.5, help="Risk decision threshold for --risk-scan (default 0.5)")
     parser.add_argument("--full-audit", action="store_true", help="Run all scans")
     parser.add_argument("--output", help="Output file path (default: stdout)")
     parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
@@ -1095,7 +1287,8 @@ Examples:
 
     # Default to full audit if no specific scan selected
     if not any([args.injection_scan, args.obfuscation_scan, args.structural_scan, args.quality_scan,
-                args.fuzz_injection, args.semantic_scan, args.e2e_test, args.full_audit]):
+                args.fuzz_injection, args.semantic_scan, args.e2e_test, args.info_theory_scan,
+                args.similarity_scan, args.risk_scan, args.ablation, args.full_audit]):
         args.full_audit = True
 
     print("\n  RAG Security Audit Tool")
@@ -1134,6 +1327,18 @@ Examples:
     if args.full_audit or args.quality_scan:
         print("  [4/7] Scanning for content quality issues...")
         findings = scan_content_quality(documents)
+        all_findings.extend(findings)
+        print(f"        Found {len(findings)} issues")
+
+    if args.full_audit or args.info_theory_scan:
+        print("  [5b] Scanning information-theoretic anomalies (entropy/compression)...")
+        findings = scan_info_theory(documents)
+        all_findings.extend(findings)
+        print(f"        Found {len(findings)} issues")
+
+    if args.full_audit or args.similarity_scan:
+        print("  [5c] Scanning similarity-based detection (near-dupes/outliers)...")
+        findings = scan_similarity(documents)
         all_findings.extend(findings)
         print(f"        Found {len(findings)} issues")
 

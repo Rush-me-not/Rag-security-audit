@@ -9,3 +9,10 @@ build/
 .coverage
 htmlcov/
 .rag_audit_key
+
+# LinkedIn drafts — live in ai-sec-lab-publish repo, never here.
+# See ~/ai-sec-lab/REPO_SEPARATION_AUDIT.md (2026-06-17).
+posts/
+publish/
+case-study.md
+post-*.md
